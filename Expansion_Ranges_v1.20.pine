@@ -1,0 +1,841 @@
+//@version=6
+// Expansion Ranges v1.20
+// A range is the consolidation that follows an expansion, drawn as two liquidity lines (reh / rel).
+//   Swings     : pivots on the chart timeframe, strength S set from the timeframe (about 4 minutes
+//                either side: 2 on 2m, 1 on 5m and above, 4 on 1m), confirmed S bars late
+//   Expansion  : swing leg >= 2.5 x median of the previous 10 legs; its first pivot is the ORIGIN
+//   Lines      : the extreme side starts at the expansion extreme; the origin side starts at the
+//                range's first pullback high / low. A new line follows price while it extends and
+//                becomes liquidity once it holds: the origin side's first line for 30 minutes, any later
+//                line for S bars. Lines work on closes: a candle that trades through a fixed line and
+//                closes back inside leaves the line where it is. A candle that closes beyond it breaks
+//                it: the line takes the sweep colour and style, stops at that candle and is labelled by
+//                break type (below). No new line starts on a broken side - the range has one live edge
+//                left and waits for the 1.272 exit
+//   Squeeze    : a fixed line is in squeeze when the last 5 candles all closed on its side of the moving
+//                average (20 EMA by default), none traded through it and all stayed in its half of the
+//                range; the line thickens and reads "reh · squeeze". When a fixed line is traded
+//                through, its label names the break: "squeeze break" (squeeze on the candle before),
+//                "sweep" (price came from the far quarter of the range within 6 candles) or "tease"
+//                (neither)
+//   Box        : the range edges are the first line that holds on each side (the expansion extreme,
+//                and the origin side's first line once it has held 30 minutes; before that the origin
+//                is the edge). They never move after that: the box, its midpoint (hidden) and the 1.272
+//                lines stay where they are. A broken box is expansion, not a wider range
+//   Exit       : 1.272 extension of each half of the box (fib rel -> midpoint, reh -> midpoint).
+//                The range ends on the first candle that closes beyond a 1.272 line, on every
+//                timeframe. A new 2.5x expansion that takes out the range's
+//                established reh (up) / rel (down) also ends it
+//   Last leg   : after a 1.272 exit, the breakout leg becomes the next expansion - from the swing
+//                where it started to its first confirmed swing extreme - if it is at least a normal
+//                swing (>= the median of the previous 10 legs). A shorter breakout leg still qualifies
+//                if it extends to that size, or continues from a higher low (up) / lower high (down);
+//                a leg from any other start drops it and the engine waits for the next 2.5x expansion
+//   Reframe    : a range opened from a breakout's last leg is reframed when the leg off its final
+//                extreme sweeps the opposite line and the next swing confirms (leg >= 0.236 of the
+//                range's expansion and >= the median of the previous 10 legs) - that leg becomes the
+//                expansion
+//   Inside     : a 2.5x expansion that stays inside the range's established reh / rel, or only wicks
+//                through it without a close beyond, is ignored
+//   Trend tag  : the reh / rel labels read "· uptrend" when the range before this one ended upward
+//                (a close above its upper 1.272, or a new expansion up through it) and this range's rel,
+//                once it has held, is above that range's lower edge (its rel, or its origin if its rel
+//                never held). "· downtrend" is the mirror. A close beyond this range's own rel (uptrend) /
+//                reh (downtrend) removes the tag for the rest of the range. A reframe is not an exit up
+//                or down. The tag describes structure; it changes nothing else
+//   Display    : the live range only; a range is removed at the candle that ends it. Nothing is drawn
+//                between a 1.272 break and the next range (the breakout's last leg or a new expansion)
+//   Alerts     : each alert type has its own tick box. At most one alert per candle: events on the same
+//                candle are joined into one message. A squeeze alerts once per line
+// Engine constants are fixed by design. The break labels describe what happened; they are not signals.
+// v1.5: -0.236 / +0.236 exits replaced by the 1.272 close exit on the live midpoint; carry rule
+//       replaced by the breakout last leg; reframe now applies to last-leg ranges. Swing detection,
+//       expansion test, level lines and display unchanged from v1.4.
+// v1.6: optional W/M turn letters (A-E) added. Engine unchanged from v1.5.
+// v1.7: review fixes - a leg between one candle's high and low is never an expansion, last leg or
+//       reframe leg; a 2.5x candidate is marked as used only when accepted, so a leg the inside
+//       rule rejects can still qualify once it extends beyond the range.
+// v1.8: display only, engine unchanged from v1.7 - W/M letters and the continuation / reversal
+//       colours removed; the expansion leg, reh / rel lines, upper sweeps and lower sweeps each
+//       have their own colour and line style; reh / rel label text is editable; every label
+//       takes the colour of its own line.
+// v1.9: a last leg or reframe leg must be at least a normal swing (>= the median of the previous 10
+//       legs) to open a range. Before, a pullback smaller than an ordinary swing could be drawn as
+//       the expansion.
+// v1.10: display only, engine unchanged from v1.9 - a range is removed at the candle that breaks the
+//        1.272, instead of staying on the chart until the next range opens.
+// v1.11: display and alerts only, engine unchanged from v1.10 - squeeze state on fixed reh / rel, break
+//        type in the break label (squeeze break / sweep / tease), optional moving average (EMA or SMA,
+//        length and colour; it also defines the squeeze).
+// v1.12: alerts only, engine and display unchanged from v1.11 - a tick box per alert type (on by default:
+//        squeeze formed, squeeze break, range ended; off: new range, tease break, sweep break); a
+//        squeeze alerts once per line instead of every time it switches back on; one alert per candle.
+// v1.13: lines work on closes - a wick through a fixed line that closes back inside leaves the line in
+//        place; only a close beyond breaks it. The origin side's first line must hold 30 minutes before
+//        it is the range edge. A breakout leg that continues from a higher low / lower high is kept. A
+//        new expansion ends the range only if it closes beyond the range edge.
+// v1.14: display and alerts only, engine unchanged from v1.13 - no SFP label and no SFP alert; lines
+//        keep their reh / rel text.
+// v1.15: the box no longer widens - each edge is fixed the first time a line holds on that side, so a
+//        break beyond reh / rel is followed by the 1.272 exit instead of a range that keeps stretching.
+// v1.16: display only, engine unchanged from v1.15 - trend tag on the reh / rel labels (uptrend /
+//        downtrend, see Trend tag above).
+// v1.17: display fix - a broken edge no longer starts a new reh / rel line, so the chart cannot show a
+//        wider range than the box the exit uses.
+// v1.18: a range ends on the first close beyond a 1.272 line (before: S + 1 consecutive closes - 2 on
+//        5m, 3 on 2m, 5 on 1m).
+// v1.19: display only - a second moving average row (EMA / SMA, length, colour) under the first. It is
+//        plotted only; the squeeze always uses the first moving average.
+// v1.20: the two rows are named Moving average 1 and Moving average 2.
+indicator("Expansion Ranges", overlay = true, max_lines_count = 500, max_labels_count = 500, max_bars_back = 5000)
+
+// ───────────────────────── Engine constants (no tuning inputs) ─────────────────────────
+const float K       = 2.5    // expansion multiple of the median leg
+const int   N       = 10     // legs in the median
+const float EXT     = 1.272  // exit extension of each half of the range
+const float RF_MIN  = 0.236  // reframe: minimum leg as a share of the range's expansion
+const float LL_MIN  = 1.0    // last leg / reframe: minimum leg as a multiple of the median of the previous N legs
+const int   ZZ_KEEP = 60     // swing points kept in memory (needs >= N + 2)
+const int   SQ_N    = 5      // squeeze: candles held between the moving average and a fixed line
+const int   FB_N    = 6      // sweep-type break: candles looked back for a run from the far side
+const float FB_ZONE = 0.25   // sweep-type break: the far quarter of the range
+const int   HOLD_MIN = 30    // minutes the origin side's first line must hold before it is the range edge
+
+// swing strength from the chart timeframe: about 4 minutes either side of the swing candle
+float tfMin = timeframe.in_seconds() / 60.0
+int   S     = math.max(1, math.round(4.0 / tfMin))
+// closes beyond 1.272 needed to end a range: one, on every timeframe
+int   NCL   = 1
+// bars the origin side's first line must hold (30 minutes, at least S bars)
+int   HOLD  = math.max(S, math.ceil(HOLD_MIN / tfMin))
+
+// ───────────────────────── Display inputs ─────────────────────────
+grpD = "Display"
+showLeg = input.bool(true, "Show expansion leg", group = grpD)
+showFib = input.bool(true, "Show 1.272 lines", group = grpD)
+showTxt = input.bool(true, "Show labels", group = grpD)
+showMA  = input.bool(false, "Moving average 1", inline = "ma", group = grpD, tooltip = "Plotted when ticked. The same average defines the squeeze whether it is plotted or not: the last 5 candles must close on the barrier side of it. The squeeze was tested with EMA 15 to 25; other settings are untested.")
+maType  = input.string("EMA", "", options = ["EMA", "SMA"], inline = "ma", group = grpD)
+maLen   = input.int(20, "", minval = 2, maxval = 400, inline = "ma", group = grpD)
+colMA   = input.color(#F59F00, "", inline = "ma", group = grpD)
+showMA2 = input.bool(false, "Moving average 2", inline = "ma2", group = grpD, tooltip = "Plotted when ticked. Display only: the squeeze always uses Moving average 1.")
+maType2 = input.string("EMA", "", options = ["EMA", "SMA"], inline = "ma2", group = grpD)
+maLen2  = input.int(50, "", minval = 2, maxval = 400, inline = "ma2", group = grpD)
+colMA2  = input.color(#9C27B0, "", inline = "ma2", group = grpD)
+
+grpC = "Lines and labels"
+colLeg = input.color(#787B86, "Expansion leg", inline = "lg", group = grpC)
+legSty = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], inline = "lg", group = grpC)
+colLvl = input.color(#787B86, "Liquidity levels", inline = "lv", group = grpC)
+lvlSty = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], inline = "lv", group = grpC)
+txtReh = input.string("reh", "Level text", inline = "tx", group = grpC, tooltip = "Upper and lower level labels, e.g. reh / rel, eqh / eql, h / l")
+txtRel = input.string("rel", "", inline = "tx", group = grpC)
+colSwU = input.color(#787B86, "Upper sweep", inline = "su", group = grpC)
+stySwU = input.string("Dashed", "", options = ["Solid", "Dashed", "Dotted"], inline = "su", group = grpC)
+colSwL = input.color(#787B86, "Lower sweep", inline = "sl", group = grpC)
+stySwL = input.string("Dashed", "", options = ["Solid", "Dashed", "Dotted"], inline = "sl", group = grpC)
+colFib = input.color(#2962FF, "Fib lines", group = grpC)
+
+grpA  = "Alerts (recreate the alert after changing these)"
+alSq  = input.bool(true,  "Squeeze formed", group = grpA, tooltip = "5 candles held between the moving average and a fixed reh / rel. Once per line: a squeeze that switches off and back on along the same line does not alert again.")
+alSqB = input.bool(true,  "Squeeze break", group = grpA, tooltip = "A fixed line closed beyond while its squeeze was on. Tested from the breaking close: 54% went half a range further before half a range back.")
+alEnd = input.bool(true,  "Range ended", group = grpA, tooltip = "A close beyond a 1.272 line, or a new expansion that closes beyond the range's reh / rel.")
+alNew = input.bool(false, "New range", group = grpA, tooltip = "A range opens: a new expansion, a breakout leg or a reframe.")
+alTs  = input.bool(false, "Tease break", group = grpA, tooltip = "A fixed line closed beyond without a squeeze, and not after a run from the far side of the range. Tested from the breaking close: 54% went half a range further first.")
+alSw  = input.bool(false, "Sweep break", group = grpA, tooltip = "A fixed line closed beyond after a run from the far quarter of the range within 6 candles. Tested from the breaking close: 50%, no edge either way.")
+
+color CLEAR = color.new(color.black, 100)
+
+// moving average: plotted on request, always used for the squeeze
+float maE = ta.ema(close, maLen)
+float maS = ta.sma(close, maLen)
+float ma  = maType == "SMA" ? maS : maE
+plot(showMA ? ma : na, "Moving average 1", color = colMA, linewidth = 1)
+
+// second moving average: display only
+float ma2E = ta.ema(close, maLen2)
+float ma2S = ta.sma(close, maLen2)
+float ma2  = maType2 == "SMA" ? ma2S : ma2E
+plot(showMA2 ? ma2 : na, "Moving average 2", color = colMA2, linewidth = 1)
+
+// ───────────────────────── Types and state ─────────────────────────
+type Lvl
+    float px
+    int   idx
+    bool  fixed = true
+    int   wait  = 0           // bars the forming level has held without being extended
+    bool  sqAl  = false       // this line has already sent a squeeze alert
+    int   need  = 1           // bars the forming line must hold before it is fixed
+    line  ln
+    label lb
+
+type Rng
+    int          dir          // 1 = expansion up, -1 = expansion down
+    float        origin
+    int          originIdx
+    int          extIdx
+    float        extPx
+    float        expSize
+    int          startIdx
+    bool         lastleg      // opened from a breakout's last leg (eligible for the reframe rule)
+    bool         reframed     // opened by the reframe rule (alert text only)
+    Lvl          reh
+    Lvl          rel
+    float        rehLast      // last established reh that was swept
+    int          rehLastIdx
+    float        relLast      // last established rel that was swept
+    int          relLastIdx
+    int          rehSweepBar  // bar of the latest reh sweep (reframe rule)
+    int          relSweepBar  // bar of the latest rel sweep (reframe rule)
+    float        hiPx         // highest high since the range started (reframe rule)
+    float        loPx         // lowest low since the range started (reframe rule)
+    float        boxH         // box top: the first reh that held - never moves
+    int          boxHIdx
+    float        boxL         // box bottom: the first rel that held - never moves
+    int          boxLIdx
+    int          tagDir = 0   // trend tag candidate: how the range before this one ended (1 up, -1 down, 0 none)
+    float        tagRef       // that range's lower edge (uptrend) / upper edge (downtrend)
+    int          tag    = 0   // 1 uptrend, -1 downtrend, 0 none
+    bool         tagDone = false   // decided against, or removed: no tag for the rest of the range
+    bool         rehGone = false   // the box reh was broken: no more lines on the upper side
+    bool         relGone = false   // the box rel was broken: no more lines on the lower side
+    int          cntUp = 0    // consecutive closes above the upper 1.272
+    int          cntDn = 0    // consecutive closes below the lower 1.272
+    int          firstUp      // bar of the first close in the current upper run
+    int          firstDn      // bar of the first close in the current lower run
+    bool         sqH = false  // squeeze on the fixed reh at the last processed candle
+    bool         sqL = false  // squeeze on the fixed rel at the last processed candle
+    array<line>  segs         // swept (terminated) level lines
+    array<label> segLbls
+    line         legLine
+    line         fU
+    line         fD
+    label        lU
+    label        lD
+
+var array<int>   zzI      = array.new<int>()
+var array<int>   zzT      = array.new<int>()     // 1 = swing high, -1 = swing low
+var array<float> zzP      = array.new<float>()
+var array<int>   declared = array.new<int>()     // start bars of legs already used as expansions
+var Rng          cur      = na                   // live range
+
+// breakout waiting for its last leg (set by a 1.272 exit)
+var bool pendOn  = false
+var int  pendDir = 0
+var int  pendT   = na
+var int  pendA   = na       // start of a breakout leg that was too short; a leg from another start drops the breakout
+var float pendAPx = na      // its price: a later start beyond it (higher low up / lower high down) continues the breakout
+
+// the range that ended last, for the next range's trend tag: how it ended and its edges
+var int   prevExit = 0      // 1 = up (1.272 or new expansion up), -1 = down, 0 = reframe / none
+var float prevLo   = na     // its lower edge: box rel, or its origin when it was an up range whose rel never held
+var float prevHi   = na     // its upper edge: box reh, or its origin when it was a down range whose reh never held
+
+// ───────────────────────── Helpers ─────────────────────────
+f_style(string s) =>
+    s == "Solid" ? line.style_solid : s == "Dotted" ? line.style_dotted : line.style_dashed
+
+f_txt(string s) =>
+    showTxt ? s : ""
+
+// join alert parts raised on the same candle into one message
+f_join(string a, string b) =>
+    a == "" ? b : b == "" ? a : a + " | " + b
+
+// add a confirmed swing point; evaluate the last leg for an expansion
+// returns [isExp, a, aPx, b, bPx, size, touched] - touched = the last swing point was added or moved
+f_procPivot(int idx, int typ, float px) =>
+    bool  changed = false
+    bool  touched = false
+    bool  isExp   = false
+    int   a       = na
+    float aPx     = na
+    int   b       = na
+    float bPx     = na
+    float sz      = na
+    int   n0      = zzT.size()
+    if n0 == 0
+        zzI.push(idx)
+        zzT.push(typ)
+        zzP.push(px)
+        touched := true
+    else if zzT.last() == typ
+        if (typ == 1 and px > zzP.last()) or (typ == -1 and px < zzP.last())
+            zzI.set(n0 - 1, idx)
+            zzP.set(n0 - 1, px)
+            changed := true
+            touched := true
+    else
+        zzI.push(idx)
+        zzT.push(typ)
+        zzP.push(px)
+        changed := true
+        touched := true
+        if zzI.size() > ZZ_KEEP
+            zzI.shift()
+            zzT.shift()
+            zzP.shift()
+    if changed
+        int j = zzP.size() - 1
+        if j - 1 >= N
+            array<float> legs = array.new<float>()
+            for m = j - N to j - 1
+                legs.push(math.abs(zzP.get(m) - zzP.get(m - 1)))
+            float med  = legs.median()
+            float size = math.abs(zzP.get(j) - zzP.get(j - 1))
+            int   st   = zzI.get(j - 1)
+            // a leg between the high and low of one candle has no known order - never an expansion.
+            // A candidate is only marked as used when it is accepted (block 3), so a leg the inside
+            // rule rejects can still qualify later if it extends beyond the range
+            if med > 0 and size >= K * med and not declared.includes(st) and zzI.get(j) != st
+                isExp := true
+                a     := st
+                aPx   := zzP.get(j - 1)
+                b     := zzI.get(j)
+                bPx   := zzP.get(j)
+                sz    := size
+    [isExp, a, aPx, b, bPx, sz, touched]
+
+// median of the N swing legs before the leg that ends at swing point j (na when there are too few)
+f_medPos(int j) =>
+    float md = na
+    if j - N >= 1
+        array<float> lg = array.new<float>()
+        for m = j - N to j - 1
+            lg.push(math.abs(zzP.get(m) - zzP.get(m - 1)))
+        md := lg.median()
+    md
+
+// a new level line from x1 to the current bar, label at the right end (reh above, rel below);
+// need = bars it must hold before it is fixed
+f_newLvl(int x1, float y, bool isHigh, bool fixed, int need) =>
+    line  ln = line.new(x1, y, bar_index, y, color = colLvl, style = f_style(lvlSty))
+    label lb = label.new(bar_index, y, f_txt(isHigh ? txtReh : txtRel), style = isHigh ? label.style_label_lower_right : label.style_label_upper_right, color = CLEAR, textcolor = colLvl, size = size.small)
+    Lvl.new(px = y, idx = x1, fixed = fixed, need = need, ln = ln, lb = lb)
+
+// text of a live line: "reh", plus " · squeeze" while in squeeze, plus the range's trend tag
+f_lvlTxt(Rng r, bool isHigh, bool sq) =>
+    (isHigh ? txtReh : txtRel) + (sq ? " · squeeze" : "") + (r.tag == 1 ? " · uptrend" : r.tag == -1 ? " · downtrend" : "")
+
+// range edges: the box edge once that side has one, else the fixed line, else the last swept fixed
+// line, else the origin
+f_effH(Rng r) =>
+    float px = na
+    int   ix = na
+    if not na(r.boxH)
+        px := r.boxH
+        ix := r.boxHIdx
+    else if r.reh.fixed
+        px := r.reh.px
+        ix := r.reh.idx
+    else if not na(r.rehLast)
+        px := r.rehLast
+        ix := r.rehLastIdx
+    else
+        px := r.origin
+        ix := r.originIdx
+    [px, ix]
+
+f_effL(Rng r) =>
+    float px = na
+    int   ix = na
+    if not na(r.boxL)
+        px := r.boxL
+        ix := r.boxLIdx
+    else if r.rel.fixed
+        px := r.rel.px
+        ix := r.rel.idx
+    else if not na(r.relLast)
+        px := r.relLast
+        ix := r.relLastIdx
+    else
+        px := r.origin
+        ix := r.originIdx
+    [px, ix]
+
+// live midpoint (hidden) and the two 1.272 exit lines; returns [upper, lower, upperAnchor, lowerAnchor]
+f_thr(Rng r) =>
+    [hp, hIx] = f_effH(r)
+    [lp, lIx] = f_effL(r)
+    float mid = (hp + lp) / 2.0
+    float up  = mid + EXT * (hp - mid)
+    float dn  = mid - EXT * (mid - lp)
+    [up, dn, hIx, lIx]
+
+// highest high / lowest low since the range started
+f_track(Rng r, float h, float l) =>
+    if na(r.hiPx) or h > r.hiPx
+        r.hiPx := h
+    if na(r.loPx) or l < r.loPx
+        r.loPx := l
+    true
+
+// one bar of level logic for one side; returns a message when an established line is broken (closed
+// beyond). up / dn are the 1.272 lines as the range stood before this candle (range height, middle)
+f_stepLvl(Rng r, bool isHigh, int u, float h, float l, float c, float up, float dn) =>
+    Lvl    v   = isHigh ? r.reh : r.rel
+    float  ext = isHigh ? h : l
+    string msg = ""
+    if na(v.px)
+        // origin side: the first range bar starts the line, it then follows the pullback and must hold
+        // for HOLD bars (30 minutes) before it is the range edge. A broken side gets no new line
+        if not (isHigh ? r.rehGone : r.relGone)
+            Lvl lv0 = f_newLvl(u, ext, isHigh, false, HOLD)
+            if isHigh
+                r.reh := lv0
+            else
+                r.rel := lv0
+    else
+        bool beyond = isHigh ? ext > v.px : ext < v.px
+        if v.fixed
+            // closes, not wicks: a candle that trades through and closes back inside leaves the line in place
+            bool cbey = isHigh ? c > v.px : c < v.px
+            if cbey
+                // remember the swept level (range edge until the new line holds) and when it was swept
+                if isHigh
+                    r.rehLast     := v.px
+                    r.rehLastIdx  := v.idx
+                    r.rehSweepBar := u
+                else
+                    r.relLast     := v.px
+                    r.relLastIdx  := v.idx
+                    r.relSweepBar := u
+                // break type from the candles before this one: the squeeze held into the break, a run
+                // from the far quarter of the range (sweep), or neither (tease)
+                string kind = (isHigh ? r.sqH : r.sqL) ? "squeeze break" : "tease"
+                if kind == "tease"
+                    float hgt = (up - dn) / EXT
+                    float mid = (up + dn) / 2.0
+                    int   off = bar_index - u
+                    for k = 1 to FB_N
+                        if isHigh ? low[off + k] <= mid - FB_ZONE * hgt : high[off + k] >= mid + FB_ZONE * hgt
+                            kind := "sweep"
+                // the broken line takes the sweep colour and style, stops at this candle and names the break
+                color swC = isHigh ? colSwU : colSwL
+                v.ln.set_x2(u)
+                v.ln.set_width(1)
+                v.ln.set_style(f_style(isHigh ? stySwU : stySwL))
+                v.ln.set_color(swC)
+                v.lb.set_xy(u, v.px)
+                v.lb.set_text(f_txt(kind))
+                v.lb.set_textcolor(kind == "squeeze break" ? colLvl : swC)
+                v.lb.set_style(isHigh ? label.style_label_lower_right : label.style_label_upper_right)   // reh sweep above, rel sweep below
+                r.segs.push(v.ln)
+                r.segLbls.push(v.lb)
+                if (kind == "squeeze break" and alSqB) or (kind == "sweep" and alSw) or (kind == "tease" and alTs)
+                    msg := (isHigh ? txtReh : txtRel) + " " + str.tostring(v.px, format.mintick) + " broken: " + kind
+                // the box edge is broken: no new line on this side, the range waits for the 1.272 exit
+                if isHigh
+                    r.reh     := Lvl.new(px = na, fixed = false)
+                    r.rehGone := true
+                else
+                    r.rel     := Lvl.new(px = na, fixed = false)
+                    r.relGone := true
+        else
+            // a forming line follows price while it extends; it is fixed once it has held for its need bars
+            if beyond
+                v.px   := ext
+                v.idx  := u
+                v.wait := 0
+                v.ln.set_xy1(u, ext)
+                v.ln.set_y2(ext)
+                v.lb.set_y(ext)
+            else
+                v.wait := v.wait + 1
+                if v.wait >= v.need
+                    v.fixed := true
+                    // the first line that holds on a side is that side's box edge for good
+                    if isHigh and na(r.boxH)
+                        r.boxH    := v.px
+                        r.boxHIdx := v.idx
+                    else if not isHigh and na(r.boxL)
+                        r.boxL    := v.px
+                        r.boxLIdx := v.idx
+    msg
+
+// show / clear the squeeze state on one fixed line; returns an alert message the first time a squeeze
+// starts on this line on a live candle (back-filled candles never alert)
+f_sqSet(Rng r, bool isHigh, bool on, bool live) =>
+    Lvl    v   = isHigh ? r.reh : r.rel
+    bool   was = isHigh ? r.sqH : r.sqL
+    string msg = ""
+    if on != was and not na(v.ln)
+        v.ln.set_width(on ? 3 : 1)
+        v.lb.set_text(f_txt(f_lvlTxt(r, isHigh, on)))
+        if on and live and not v.sqAl
+            v.sqAl := true
+            if alSq
+                msg := (isHigh ? txtReh : txtRel) + " " + str.tostring(v.px, format.mintick) + " squeeze"
+    if isHigh
+        r.sqH := on
+    else
+        r.sqL := on
+    msg
+
+// one bar of range logic: 1.272 close count first (against the range as it stood before this bar),
+// then the level lines, then the squeeze state at this bar's close.
+// Returns [exitDir, firstBar, msgHigh, msgLow, msgSqueezeHigh, msgSqueezeLow]; exitDir 0 = range still live.
+// live = false on back-filled candles (their messages are never sent)
+f_bar(Rng r, int u, float h, float l, float c, bool live) =>
+    f_track(r, h, l)
+    [up, dn, aU, aD] = f_thr(r)
+    int    exitDir  = 0
+    int    firstBar = na
+    string m1       = ""
+    string m2       = ""
+    string m3       = ""
+    string m4       = ""
+    if c > up
+        r.cntUp := r.cntUp + 1
+        r.cntDn := 0
+        if r.cntUp == 1
+            r.firstUp := u
+    else if c < dn
+        r.cntDn := r.cntDn + 1
+        r.cntUp := 0
+        if r.cntDn == 1
+            r.firstDn := u
+    else
+        r.cntUp := 0
+        r.cntDn := 0
+    if r.cntUp >= NCL
+        exitDir  := 1
+        firstBar := r.firstUp
+    else if r.cntDn >= NCL
+        exitDir  := -1
+        firstBar := r.firstDn
+    else
+        m1 := f_stepLvl(r, true, u, h, l, c, up, dn)
+        m2 := f_stepLvl(r, false, u, h, l, c, up, dn)
+        // squeeze at this candle's close: the last SQ_N candles closed on the barrier side of the moving
+        // average, none traded through the fixed line and all stayed in its half of the range
+        [up2, dn2, aU2, aD2] = f_thr(r)
+        float mid2 = (up2 + dn2) / 2.0
+        int   off  = bar_index - u
+        bool  sqH  = r.reh.fixed and not na(r.reh.px)
+        bool  sqL  = r.rel.fixed and not na(r.rel.px)
+        for k = 0 to SQ_N - 1
+            if sqH and not (close[off + k] > ma[off + k] and high[off + k] <= r.reh.px and low[off + k] >= mid2)
+                sqH := false
+            if sqL and not (close[off + k] < ma[off + k] and low[off + k] >= r.rel.px and high[off + k] <= mid2)
+                sqL := false
+        m3 := f_sqSet(r, true, sqH, live)
+        m4 := f_sqSet(r, false, sqL, live)
+        // trend tag: decided once this range's edge on the trend side has held, removed by a close beyond it
+        if not r.tagDone and r.tagDir != 0 and not na(r.tagRef)
+            if r.tag == 0
+                if r.tagDir == 1 and not na(r.boxL)
+                    r.tag     := r.boxL > r.tagRef ? 1 : 0
+                    r.tagDone := r.tag == 0
+                else if r.tagDir == -1 and not na(r.boxH)
+                    r.tag     := r.boxH < r.tagRef ? -1 : 0
+                    r.tagDone := r.tag == 0
+            else if (r.tag == 1 and c < r.boxL) or (r.tag == -1 and c > r.boxH)
+                r.tag     := 0
+                r.tagDone := true
+        // live line labels: squeeze state and trend tag
+        if not na(r.reh.lb)
+            r.reh.lb.set_text(f_txt(f_lvlTxt(r, true, r.sqH)))
+        if not na(r.rel.lb)
+            r.rel.lb.set_text(f_txt(f_lvlTxt(r, false, r.sqL)))
+    [exitDir, firstBar, m1, m2, m3, m4]
+
+f_extendLvl(Lvl v, int x) =>
+    if not na(v.ln)
+        v.ln.set_x2(x)
+        v.lb.set_x(x)
+    true
+
+// extend the live lines to x and move the 1.272 lines to the range as it now stands
+f_extend(Rng r, int x) =>
+    f_extendLvl(r.reh, x)
+    f_extendLvl(r.rel, x)
+    if not na(r.fU)
+        [up, dn, aU, aD] = f_thr(r)
+        r.fU.set_xy1(aU, up)
+        r.fU.set_xy2(x, up)
+        r.lU.set_xy(x, up)
+        r.fD.set_xy1(aD, dn)
+        r.fD.set_xy2(x, dn)
+        r.lD.set_xy(x, dn)
+    true
+
+f_delete(Rng r) =>
+    if not na(r.reh.ln)
+        line.delete(r.reh.ln)
+        label.delete(r.reh.lb)
+    if not na(r.rel.ln)
+        line.delete(r.rel.ln)
+        label.delete(r.rel.lb)
+    for ln in r.segs
+        line.delete(ln)
+    for lb in r.segLbls
+        label.delete(lb)
+    if not na(r.legLine)
+        line.delete(r.legLine)
+    if not na(r.fU)
+        line.delete(r.fU)
+        label.delete(r.lU)
+        line.delete(r.fD)
+        label.delete(r.lD)
+    true
+
+// ───────────────────────── 1. Swing pivots (confirmed S bars after the swing bar) ─────────────────────────
+bool  expNow = false
+int   eA     = na
+float eAPx   = na
+int   eB     = na
+float eBPx   = na
+float eSz    = na
+
+// swing points added or moved on this bar, with the swing before each (for the last leg)
+int   nv1I  = na
+int   nv1T  = na
+float nv1P  = na
+int   nv1aI = na
+int   nv1aT = na
+float nv1aP = na
+float nv1M  = na
+int   nv2I  = na
+int   nv2T  = na
+float nv2P  = na
+int   nv2aI = na
+int   nv2aT = na
+float nv2aP = na
+float nv2M  = na
+
+float rMaxH = ta.highest(high, S)            // bars after the swing bar
+float lMaxH = ta.highest(high, S)[S + 1]     // bars before the swing bar
+float rMinL = ta.lowest(low, S)
+float lMinL = ta.lowest(low, S)[S + 1]
+
+if bar_index >= 2 * S
+    bool ph = high[S] > lMaxH and high[S] >= rMaxH
+    bool pl = low[S] < lMinL and low[S] <= rMinL
+    if ph or pl
+        int p  = bar_index - S
+        int t1 = ph and pl ? (zzT.size() > 0 and zzT.last() == 1 ? -1 : 1) : (ph ? 1 : -1)
+        [x1, a1, ap1, b1, bp1, s1, k1] = f_procPivot(p, t1, t1 == 1 ? high[S] : low[S])
+        if k1 and zzI.size() >= 2
+            nv1I  := zzI.get(zzI.size() - 1)
+            nv1T  := zzT.get(zzT.size() - 1)
+            nv1P  := zzP.get(zzP.size() - 1)
+            nv1aI := zzI.get(zzI.size() - 2)
+            nv1aT := zzT.get(zzT.size() - 2)
+            nv1aP := zzP.get(zzP.size() - 2)
+            nv1M  := f_medPos(zzP.size() - 1)
+        if x1
+            expNow := true
+            eA     := a1
+            eAPx   := ap1
+            eB     := b1
+            eBPx   := bp1
+            eSz    := s1
+        if ph and pl
+            int t2 = -t1
+            [x2, a2, ap2, b2, bp2, s2, k2] = f_procPivot(p, t2, t2 == 1 ? high[S] : low[S])
+            if k2 and zzI.size() >= 2
+                if na(nv1I)
+                    nv1I  := zzI.get(zzI.size() - 1)
+                    nv1T  := zzT.get(zzT.size() - 1)
+                    nv1P  := zzP.get(zzP.size() - 1)
+                    nv1aI := zzI.get(zzI.size() - 2)
+                    nv1aT := zzT.get(zzT.size() - 2)
+                    nv1aP := zzP.get(zzP.size() - 2)
+                    nv1M  := f_medPos(zzP.size() - 1)
+                else
+                    nv2I  := zzI.get(zzI.size() - 1)
+                    nv2T  := zzT.get(zzT.size() - 1)
+                    nv2P  := zzP.get(zzP.size() - 1)
+                    nv2aI := zzI.get(zzI.size() - 2)
+                    nv2aT := zzT.get(zzT.size() - 2)
+                    nv2aP := zzP.get(zzP.size() - 2)
+                    nv2M  := f_medPos(zzP.size() - 1)
+            if x2
+                expNow := true
+                eA     := a2
+                eAPx   := ap2
+                eB     := b2
+                eBPx   := bp2
+                eSz    := s2
+
+// ───────────────────────── 1b. Inside rule: an expansion inside the live range is ignored ─────────────────────────
+bool useExp   = expNow
+bool fromLeg  = false
+bool reframed = false
+if useExp and not na(cur)
+    int   dN    = eBPx > eAPx ? 1 : -1
+    Lvl   lvS   = dN == 1 ? cur.reh : cur.rel
+    float lvlPx = lvS.fixed ? lvS.px : (dN == 1 ? cur.rehLast : cur.relLast)
+    if not na(lvlPx)
+        if dN == 1 ? eBPx <= lvlPx : eBPx >= lvlPx
+            useExp := false
+        else
+            // closes, not wicks: the expansion must close beyond the range edge
+            bool closed = false
+            for k = 0 to math.max(0, bar_index - eA - 1)
+                if dN == 1 ? close[k] > lvlPx : close[k] < lvlPx
+                    closed := true
+                    break
+            if not closed
+                useExp := false
+
+// alert parts raised on this candle, sent as one alert at the end of the script
+string aMsg = ""
+
+// ───────────────────────── 2. Live range: 1.272 close exit first, then level sweeps ─────────────────────────
+if not na(cur) and bar_index >= cur.startIdx and not useExp
+    [exD, fBar, m1, m2, m3, m4] = f_bar(cur, bar_index, high, low, close, true)
+    if exD != 0
+        // live range only: the range is removed at the candle that breaks it
+        if alEnd
+            aMsg := f_join(aMsg, "range ended, " + (exD == 1 ? "closes above the upper 1.272" : "closes below the lower 1.272"))
+        pendOn  := true
+        pendDir := exD
+        pendT   := fBar
+        pendA   := na
+        prevExit := exD
+        prevLo   := not na(cur.boxL) ? cur.boxL : cur.dir == 1 ? cur.origin : na
+        prevHi   := not na(cur.boxH) ? cur.boxH : cur.dir == -1 ? cur.origin : na
+        f_delete(cur)
+        cur     := na
+    else
+        aMsg := f_join(aMsg, m1)
+        aMsg := f_join(aMsg, m2)
+        aMsg := f_join(aMsg, m3)
+        aMsg := f_join(aMsg, m4)
+        f_extend(cur, bar_index)
+
+// ───────────────────────── 2b. Last leg: the breakout leg becomes the next expansion ─────────────────────────
+// it must be at least a normal swing (LL_MIN x the median of the previous N legs). A shorter breakout
+// leg can still qualify as it extends, or continue from a higher low (up) / lower high (down); a leg from
+// any other start drops the breakout
+if not useExp and na(cur) and pendOn
+    bool llDone = false
+    if not na(nv1I) and nv1T == pendDir and nv1I >= pendT and nv1aT == -pendDir and nv1aI != nv1I
+        // a leg from a new start continues the breakout if that start is a higher low (up) / lower high (down)
+        bool cont1 = not na(pendA) and nv1aI != pendA and (pendDir == 1 ? nv1aP > pendAPx : nv1aP < pendAPx)
+        if not na(pendA) and nv1aI != pendA and not cont1
+            pendOn := false
+            llDone := true
+        else if not na(nv1M) and math.abs(nv1P - nv1aP) < LL_MIN * nv1M
+            pendA   := nv1aI
+            pendAPx := nv1aP
+        else
+            eA      := nv1aI
+            eAPx    := nv1aP
+            eB      := nv1I
+            eBPx    := nv1P
+            eSz     := math.abs(nv1P - nv1aP)
+            useExp  := true
+            fromLeg := true
+            llDone  := true
+    if not llDone and not na(nv2I) and nv2T == pendDir and nv2I >= pendT and nv2aT == -pendDir and nv2aI != nv2I
+        bool cont2 = not na(pendA) and nv2aI != pendA and (pendDir == 1 ? nv2aP > pendAPx : nv2aP < pendAPx)
+        if not na(pendA) and nv2aI != pendA and not cont2
+            pendOn := false
+        else if not na(nv2M) and math.abs(nv2P - nv2aP) < LL_MIN * nv2M
+            pendA   := nv2aI
+            pendAPx := nv2aP
+        else
+            eA      := nv2aI
+            eAPx    := nv2aP
+            eB      := nv2I
+            eBPx    := nv2P
+            eSz     := math.abs(nv2P - nv2aP)
+            useExp  := true
+            fromLeg := true
+
+// ───────────────────────── 2c. Reframe: a last-leg range is reframed on the leg off its final extreme ─────────────────────────
+if not useExp and not na(cur) and cur.lastleg and not na(nv1I) and zzI.size() >= 3
+    int   dc  = cur.dir
+    int   zn  = zzI.size()
+    int   z3I = zzI.get(zn - 3)
+    int   z3T = zzT.get(zn - 3)
+    float z3P = zzP.get(zn - 3)
+    int   z2I = zzI.get(zn - 2)
+    int   z2T = zzT.get(zn - 2)
+    float z2P = zzP.get(zn - 2)
+    int   z1T = zzT.get(zn - 1)
+    float fin = dc == -1 ? math.min(cur.extPx, cur.loPx) : math.max(cur.extPx, cur.hiPx)
+    int   ls  = dc == -1 ? cur.rehSweepBar : cur.relSweepBar
+    bool  pattern = z3T == dc and z2T == -dc and z1T == dc and z3I >= cur.extIdx and z3P == fin and z3I != z2I
+    float mdR = f_medPos(zn - 2)
+    if pattern and not na(ls) and ls > z3I and math.abs(z2P - z3P) >= RF_MIN * cur.expSize and (na(mdR) or math.abs(z2P - z3P) >= LL_MIN * mdR)
+        eA       := z3I
+        eAPx     := z3P
+        eB       := z2I
+        eBPx     := z2P
+        eSz      := math.abs(z2P - z3P)
+        useExp   := true
+        reframed := true
+
+// ───────────────────────── 3. An expansion ends the live range and opens the next ─────────────────────────
+if useExp
+    int d = eBPx > eAPx ? 1 : -1
+    if not na(cur)
+        // a new expansion through the range is the range ending; a reframe is a new range
+        if reframed ? alNew : alEnd
+            aMsg := f_join(aMsg, "range ended, " + (reframed ? "reframed to the last leg" : "new expansion " + (d == 1 ? "up" : "down")))
+        prevExit := reframed ? 0 : d
+        prevLo   := not na(cur.boxL) ? cur.boxL : cur.dir == 1 ? cur.origin : na
+        prevHi   := not na(cur.boxH) ? cur.boxH : cur.dir == -1 ? cur.origin : na
+        f_delete(cur)                 // live range only: the new range replaces it
+        cur := na
+    pendOn := false
+    // every accepted expansion marks its start as used, whatever opened it
+    if not declared.includes(eA)
+        declared.push(eA)
+        if declared.size() > 100
+            declared.shift()
+    Rng r = Rng.new(dir = d, origin = eAPx, originIdx = eA, extIdx = eB, extPx = eBPx, expSize = eSz, startIdx = eB + 1, lastleg = fromLeg, reframed = reframed, segs = array.new<line>(), segLbls = array.new<label>(), tagDir = prevExit, tagRef = prevExit == 1 ? prevLo : prevExit == -1 ? prevHi : na)
+    // extreme side starts at the expansion extreme; origin side waits for the first pullback
+    if d == 1
+        r.reh     := f_newLvl(eB, eBPx, true, true, S)
+        r.rel     := Lvl.new(px = na, fixed = false)
+        r.boxH    := eBPx
+        r.boxHIdx := eB
+    else
+        r.reh     := Lvl.new(px = na, fixed = false)
+        r.rel     := f_newLvl(eB, eBPx, false, true, S)
+        r.boxL    := eBPx
+        r.boxLIdx := eB
+    if showLeg
+        r.legLine := line.new(eA, eAPx, eB, eBPx, color = colLeg, style = f_style(legSty), width = 2)
+    if showFib
+        r.fU := line.new(eB, eBPx, bar_index, eBPx, color = colFib, style = line.style_dotted)
+        r.lU := label.new(bar_index, eBPx, f_txt("1.272"), style = label.style_label_left, color = CLEAR, textcolor = colFib, size = size.small)
+        r.fD := line.new(eB, eBPx, bar_index, eBPx, color = colFib, style = line.style_dotted)
+        r.lD := label.new(bar_index, eBPx, f_txt("1.272"), style = label.style_label_left, color = CLEAR, textcolor = colFib, size = size.small)
+    // back-fill the bars printed since the extreme (pivot confirmation lag)
+    bool dead    = false
+    int  deadDir = 0
+    int  deadT   = na
+    for u = r.startIdx to bar_index
+        int off = bar_index - u
+        [bxD, bxT, bm1, bm2, bm3, bm4] = f_bar(r, u, high[off], low[off], close[off], false)
+        if bxD != 0
+            dead    := true
+            deadDir := bxD
+            deadT   := bxT
+            break
+    if dead
+        f_delete(r)
+        pendOn  := true
+        pendDir := deadDir
+        pendT   := deadT
+        pendA   := na
+    else
+        f_extend(r, bar_index)
+        cur := r
+        if alNew
+            string expMsg = "expansion " + (d == 1 ? "up" : "down")
+            expMsg := expMsg + (fromLeg ? " from the breakout leg" : reframed ? " reframed to the last leg" : " confirmed")
+            expMsg := expMsg + ", origin " + str.tostring(eAPx, format.mintick)
+            aMsg := f_join(aMsg, expMsg)
+
+// ───────────────────────── 4. One alert per candle ─────────────────────────
+if aMsg != ""
+    alert(syminfo.ticker + ": " + aMsg, alert.freq_once_per_bar_close)
+
+// ───────────────────────── end of Expansion Ranges v1.20 ─────────────────────────
